@@ -16,7 +16,6 @@ limitations under the License.
 
 #define  _CRT_SECURE_NO_WARNINGS
 
-#include "windows.h"
 #include "common.h"
 #include "litecov.h"
 
@@ -78,24 +77,15 @@ void LiteCov::OnModuleInstrumented(ModuleInfo *module) {
     data->coverage_buffer_size = module->code_size;
   }
 
-  // allocate a coverage buffer near instrumented code
-  // this ensures that we can write to it using mov [rip+offset], ...
-  uint64_t min_address = 
-    (uint64_t)module->instrumented_code_remote + module->instrumented_code_size;
-  if (min_address < 0x80000000) min_address = 0;
-  else min_address -= 0x80000000;
-  uint64_t max_address = (uint64_t)module->instrumented_code_remote;
-  if (max_address < data->coverage_buffer_size) max_address = 0;
-  else max_address -= data->coverage_buffer_size;
-
   // map as readonly initially
   // this causes an exception the first time coverage is written to the buffer
   // this enables us to quickly determine if we had new coverage or not
   data->coverage_buffer_remote = 
-    (unsigned char *)RemoteAllocateBefore(min_address,
-                                          max_address,
-                                          module->instrumented_code_size,
-                                          PAGE_READONLY);
+    (unsigned char *)RemoteAllocateNear((uint64_t)module->instrumented_code_remote,
+                                        (uint64_t)module->instrumented_code_remote
+                                          + module->instrumented_code_size,
+                                        data->coverage_buffer_size,
+                                        READONLY);
 
   if (!data->coverage_buffer_remote) {
     FATAL("Could not allocate coverage buffer");
@@ -108,7 +98,7 @@ void LiteCov::OnModuleUninstrumented(ModuleInfo *module) {
   CollectCoverage(data);
 
   if (data->coverage_buffer_remote) {
-    VirtualFreeEx(child_handle, data->coverage_buffer_remote, 0, MEM_RELEASE);
+    RemoteFree(data->coverage_buffer_remote, data->coverage_buffer_size);
   }
 
   data->ClearInstrumentationData();
@@ -197,7 +187,7 @@ void LiteCov::InstrumentEdge(
 
 // basic block code is just offset from the start of the module
 uint64_t LiteCov::GetBBCode(ModuleInfo *module, size_t bb_address) {
-  return ((uint64_t)bb_address - (uint64_t)module->base);
+  return ((uint64_t)bb_address - (uint64_t)module->min_address);
 }
 
 // edge code has previous offset in higher 32 bits
@@ -208,9 +198,9 @@ uint64_t LiteCov::GetEdgeCode(
     ModuleInfo *module, size_t edge_address1, size_t edge_address2)
 {
   uint64_t offset1 = 0;
-  if (edge_address1) offset1 = ((uint64_t)edge_address1 - (uint64_t)module->base);
+  if (edge_address1) offset1 = ((uint64_t)edge_address1 - (uint64_t)module->min_address);
   uint64_t offset2 = 0;
-  if (edge_address2) offset2 = ((uint64_t)edge_address2 - (uint64_t)module->base);
+  if (edge_address2) offset2 = ((uint64_t)edge_address2 - (uint64_t)module->min_address);
 
   return((offset1 << 32) + (offset2 & 0xFFFFFFFF));
 }
@@ -245,31 +235,26 @@ ModuleCovData *LiteCov::GetDataByRemoteAddress(size_t address) {
 
 // catches writing to the coverage buffer for the first time
 void LiteCov::HandleBufferWriteException(ModuleCovData *data) {
-  DWORD old_protect;
-  if (!VirtualProtectEx(child_handle,
-                        data->coverage_buffer_remote,
-                        data->coverage_buffer_size,
-                        PAGE_READWRITE, &old_protect))
-  {
-    FATAL("Could not make coverage buffer writeable");
-  }
+  RemoteProtect(data->coverage_buffer_remote,
+                data->coverage_buffer_size,
+                READWRITE);
+
   data->has_remote_coverage = true;
 }
 
-bool LiteCov::OnException(
-    EXCEPTION_RECORD *exception_record, DWORD thread_id)
+bool LiteCov::OnException(Exception *exception_record)
 {
-  if ((exception_record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) &&
-    (exception_record->ExceptionInformation[0] == 1)) {
+  if ((exception_record->type == ACCESS_VIOLATION) &&
+    (exception_record->maybe_write_violation)) {
     ModuleCovData *data =
-      GetDataByRemoteAddress(exception_record->ExceptionInformation[1]);
+      GetDataByRemoteAddress((size_t)exception_record->access_address);
     if (data) {
       HandleBufferWriteException(data);
       return true;
     }
   }
 
-  return TinyInst::OnException(exception_record, thread_id);
+  return TinyInst::OnException(exception_record);
 }
 
 void LiteCov::ClearRemoteBuffer(ModuleCovData *data) {
@@ -279,24 +264,11 @@ void LiteCov::ClearRemoteBuffer(ModuleCovData *data) {
   unsigned char *buf = (unsigned char *)malloc(data->coverage_buffer_next);
   memset(buf, 0, data->coverage_buffer_next);
 
-  SIZE_T num_written;
-  if (!WriteProcessMemory(child_handle,
-                          data->coverage_buffer_remote,
-                          buf,
-                          data->coverage_buffer_next,
-                          &num_written)) {
-    FATAL("Error clearing coverage buffer");
-  }
+  RemoteWrite(data->coverage_buffer_remote, buf, data->coverage_buffer_next);
 
-  DWORD old_protect;
-  if (!VirtualProtectEx(child_handle,
-                        data->coverage_buffer_remote,
-                        data->coverage_buffer_size,
-                        PAGE_READONLY,
-                        &old_protect))
-  {
-    FATAL("Could not make coverage buffer readonly");
-  }
+  RemoteProtect(data->coverage_buffer_remote,
+                data->coverage_buffer_size,
+                READONLY);
 
   data->has_remote_coverage = false;
 
@@ -324,15 +296,7 @@ void LiteCov::CollectCoverage(ModuleCovData *data) {
 
   unsigned char *buf = (unsigned char *)malloc(data->coverage_buffer_next);
 
-  SIZE_T num_read;
-  if (!ReadProcessMemory(child_handle,
-                         data->coverage_buffer_remote,
-                         buf,
-                         data->coverage_buffer_next,
-                         &num_read))
-  {
-    FATAL("Error reading coverage buffer");
-  }
+  RemoteRead(data->coverage_buffer_remote, buf, data->coverage_buffer_next);
 
   for (size_t i = 0; i < data->coverage_buffer_next; i++) {
     if (buf[i]) {
@@ -340,6 +304,8 @@ void LiteCov::CollectCoverage(ModuleCovData *data) {
       data->collected_coverage.insert(coverage_code);
     }
   }
+
+  free(buf);
 
   ClearRemoteBuffer(data);
 }

@@ -20,6 +20,10 @@ limitations under the License.
 #include <set>
 #include <list>
 
+#ifndef MAX_PATH
+  #define MAX_PATH 260
+#endif
+
 class ModuleCoverage {
 public:
   ModuleCoverage();
@@ -32,7 +36,27 @@ public:
 typedef std::list<ModuleCoverage> Coverage;
 
 ModuleCoverage *GetModuleCoverage(Coverage &coverage, char *name);
-void MergeCoverage(Coverage &coverage, Coverage &toAdd);
+
+void PrintCoverage(Coverage& coverage);
 void WriteCoverage(Coverage& coverage, char *filename);
+
+void MergeCoverage(Coverage &coverage, Coverage &toAdd);
+void CoverageIntersection(Coverage &coverage1,
+                       Coverage &coverage2,
+                       Coverage &result);
+// returns coverage2 not present in coverage1
+void CoverageDifference(Coverage &coverage1,
+                        Coverage &coverage2,
+                        Coverage &result);
+// returns coverage2 not present in coverage1 and vice versa
+void CoverageSymmetricDifference(Coverage &coverage1,
+                                Coverage &coverage2,
+                                Coverage &result);
+bool CoverageContains(Coverage &coverage1, Coverage &coverage2);
+
+void ReadCoverageBinary(Coverage& coverage, char *filename);
+void ReadCoverageBinary(Coverage& coverage, FILE *fp);
+void WriteCoverageBinary(Coverage& coverage, char *filename);
+void WriteCoverageBinary(Coverage& coverage, FILE *fp);
 
 #endif // COVERAGE_H

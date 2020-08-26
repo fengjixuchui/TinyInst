@@ -14,7 +14,22 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#ifndef COMMON_H
+#define COMMON_H
+
 #include <list>
+
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32)
+    #include <windows.h>
+#elif __APPLE__
+    #include <limits.h>
+    #ifndef MAX_PATH
+        #define MAX_PATH PATH_MAX
+    #endif
+
+    #include <strings.h>
+    #define _stricmp strcasecmp
+#endif
 
 enum {
   /* 00 */ FAULT_NONE,
@@ -44,9 +59,11 @@ enum {
 // gets time in milliseconds
 uint64_t GetCurTime(void);
 
-char *GetOption(char *name, int argc, char** argv);
-void GetOptionAll(char *name, int argc, char** argv, std::list<char *> *results);
-bool GetBinaryOption(char *name, int argc, char** argv, bool default_value);
-int GetIntOption(char *name, int argc, char** argv, int default_value);
+char *GetOption(const char *name, int argc, char** argv);
+void GetOptionAll(const char *name, int argc, char** argv, std::list<char *> *results);
+bool GetBinaryOption(const char *name, int argc, char** argv, bool default_value);
+int GetIntOption(const char *name, int argc, char** argv, int default_value);
 
 char *ArgvToCmd(int argc, char** argv);
+
+#endif

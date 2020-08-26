@@ -17,9 +17,9 @@ limitations under the License.
 #include <inttypes.h>
 #include <list>
 
-#include "windows.h"
-
 #include "common.h"
+
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32)
 
 uint64_t GetCurTime(void) {
   uint64_t ret;
@@ -31,6 +31,8 @@ uint64_t GetCurTime(void) {
   return ret / 10000;
 }
 
+#endif // Windows
+
 bool BoolFromOptionValue(char *value) {
   if (_stricmp(value, "off") == 0) return false;
   if (_stricmp(value, "false") == 0) return false;
@@ -38,7 +40,7 @@ bool BoolFromOptionValue(char *value) {
   return true;
 }
 
-bool GetBinaryOption(char *name, int argc, char** argv, bool default_value) {
+bool GetBinaryOption(const char *name, int argc, char** argv, bool default_value) {
   for (int i = 0; i < argc; i++) {
     if (strcmp(argv[i], "--") == 0) break;
     if (strcmp(argv[i], name) == 0) {
@@ -56,7 +58,7 @@ bool GetBinaryOption(char *name, int argc, char** argv, bool default_value) {
   return default_value;
 }
 
-char *GetOption(char *name, int argc, char** argv) {
+char *GetOption(const char *name, int argc, char** argv) {
   for (int i = 0; i < argc; i++) {
     if(strcmp(argv[i], "--") == 0) return NULL;
     if(strcmp(argv[i], name) == 0) {
@@ -76,7 +78,7 @@ char *GetOption(char *name, int argc, char** argv) {
 }
 
 
-void GetOptionAll(char *name, int argc, char** argv, std::list<char *> *results) {
+void GetOptionAll(const char *name, int argc, char** argv, std::list<char *> *results) {
   for (int i = 0; i < argc; i++) {
     if (strcmp(argv[i], "--") == 0) return;
     if (strcmp(argv[i], name) == 0) {
@@ -94,7 +96,7 @@ void GetOptionAll(char *name, int argc, char** argv, std::list<char *> *results)
   }
 }
 
-int GetIntOption(char *name, int argc, char** argv, int default_value) {
+int GetIntOption(const char *name, int argc, char** argv, int default_value) {
   char *option = GetOption(name, argc, argv);
   if (!option) return default_value;
   return strtol(option, NULL, 0);

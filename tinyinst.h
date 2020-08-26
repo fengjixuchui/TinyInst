@@ -22,7 +22,8 @@ limitations under the License.
 #include <unordered_map>
 #include <unordered_set>
 
-#include "debugger.h"
+#include "Windows/debugger.h"
+#include "common.h"
 
 // must be a power of two
 #define JUMPTABLE_SIZE 0x2000
@@ -54,12 +55,6 @@ protected:
     INST_STOPBB
   };
 
-  struct AddressRange {
-    size_t from;
-    size_t to;
-    char *data;
-  };
-
   struct IndirectBreakpoinInfo {
     size_t list_head;
     size_t source_bb;
@@ -68,11 +63,12 @@ protected:
   class ModuleInfo {
   public:
     ModuleInfo();
-    void ClearInstrumentation(HANDLE child_handle);
+    void ClearInstrumentation();
 
     char module_name[MAX_PATH];
-    void *base;
-    size_t size;
+    void *module_header;
+    size_t min_address;
+    size_t max_address;
     size_t code_size;
     bool loaded;
     bool instrumented;
@@ -83,7 +79,6 @@ protected:
     char *instrumented_code_local;
     char *instrumented_code_remote;
     char *instrumented_code_remote_previous;
-    HANDLE mapping;
 
     std::unordered_map<uint32_t, uint32_t> basic_blocks;
 
@@ -113,21 +108,16 @@ protected:
   };
 
   virtual void OnEntrypoint() override;
-  virtual void OnProcessCreated(CREATE_PROCESS_DEBUG_INFO *info) override;
+  virtual void OnProcessCreated() override;
   virtual void OnProcessExit() override;
-  virtual void OnModuleLoaded(HMODULE module, char *module_name) override;
-  virtual void OnModuleUnloaded(HMODULE module) override;
-  virtual bool OnException(EXCEPTION_RECORD *exception_record, DWORD thread_id) override;
-  virtual void OnTargetMethodReached(DWORD thread_id) override;
-  virtual void OnCrashed(EXCEPTION_RECORD *exception_record) override;
+  virtual void OnModuleLoaded(void *module, char *module_name) override;
+  virtual void OnModuleUnloaded(void *module) override;
+  virtual bool OnException(Exception *exception_record) override;
+  virtual void OnTargetMethodReached() override;
+  virtual void OnCrashed(Exception *exception_record) override;
 
   virtual size_t GetTranslatedAddress(size_t address) override;
 
-  // helper functions
-  void *RemoteAllocateBefore(uint64_t min_address,
-                             uint64_t max_address,
-                             size_t size,
-                             DWORD protection_flags);
   void OffsetStack(ModuleInfo *module, int32_t offset);
   void ReadStack(ModuleInfo *module, int32_t offset);
   void WriteStack(ModuleInfo *module, int32_t offset);
@@ -158,15 +148,13 @@ protected:
   AddressRange *GetRegion(ModuleInfo *module, size_t address);
 
 private:
-  bool HandleBreakpoint(void *address, DWORD thread_id);
-  void OnInstrumentModuleLoaded(HMODULE module, ModuleInfo *target_module);
+  bool HandleBreakpoint(void *address);
+  void OnInstrumentModuleLoaded(void *module, ModuleInfo *target_module);
   ModuleInfo *IsInstrumentModule(char *module_name);
   void InstrumentAllLoadedModules();
-  void ExtractCodeRanges(ModuleInfo *module);
-  void ProtectCodeRanges(ModuleInfo *module);
   void InstrumentModule(ModuleInfo *module);
   void ClearInstrumentation(ModuleInfo *module);
-  bool TryExecuteInstrumented(char * address, DWORD thread_id);
+  bool TryExecuteInstrumented(char * address);
   size_t GetTranslatedAddress(ModuleInfo *module, size_t address);
   void TranslateBasicBlock(char *address,
                            ModuleInfo *module,
@@ -225,7 +213,7 @@ private:
                                                            xed_decoded_inst_t *xedd,
                                                            size_t instruction_address);
 
-  void TinyInst::PushReturnAddress(ModuleInfo *module, uint64_t return_address);
+  void PushReturnAddress(ModuleInfo *module, uint64_t return_address);
 
   bool IsRipRelative(ModuleInfo *module,
                      xed_decoded_inst_t *xedd,
@@ -238,7 +226,7 @@ private:
                            size_t list_head_offset,
                            size_t edge_start_address,
                            bool global_indirect);
-  bool HandleIndirectJMPBreakpoint(void *address, DWORD thread_id);
+  bool HandleIndirectJMPBreakpoint(void *address);
 
   // instrumentation API
   virtual void OnModuleEntered(ModuleInfo *module, size_t entry_address) {}
