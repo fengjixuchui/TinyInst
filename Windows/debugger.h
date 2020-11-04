@@ -36,6 +36,7 @@ public:
 
   virtual void Init(int argc, char **argv);
   DebuggerStatus Run(char *cmd, uint32_t timeout);
+  DebuggerStatus Run(int argc, char **argv, uint32_t timeout);
   DebuggerStatus Kill();
   DebuggerStatus Continue(uint32_t timeout);
   DebuggerStatus Attach(unsigned int pid, uint32_t timeout);
@@ -43,6 +44,25 @@ public:
   bool IsTargetAlive() { return (child_handle != NULL); };
   bool IsTargetFunctionDefined() { return target_function_defined; };
   
+  enum ExceptionType {
+    BREAKPOINT,
+    ACCESS_VIOLATION,
+    ILLEGAL_INSTRUCTION,
+    OTHER
+  };
+
+  struct Exception {
+    ExceptionType type;
+    void *ip;
+    bool maybe_write_violation;
+    bool maybe_execute_violation;
+    void *access_address;
+  };
+
+  Exception GetLastException() {
+    return last_exception;
+  }
+
 protected:
 
   enum MemoryProtection {
@@ -70,21 +90,6 @@ protected:
     R14,
     R15,
     RIP
-  };
-
-  enum ExceptionType {
-    BREAKPOINT,
-    ACCESS_VIOLATION,
-    ILLEGAL_INSTRUCTION,
-    OTHER
-  };
-
-  struct Exception {
-    ExceptionType type;
-    void *ip;
-    bool maybe_write_violation;
-    bool maybe_execute_violation;
-    void *access_address;
   };
 
   struct AddressRange {
@@ -137,6 +142,8 @@ protected:
   size_t GetRegister(Register r);
   void SetRegister(Register r, size_t value);
 
+  void *GetTargetMethodAddress() { return target_address;  }
+
 private:
   struct Breakpoint {
     void *address;
@@ -147,7 +154,7 @@ private:
 
   void StartProcess(char *cmd);
   void GetProcessPlatform();
-  DebuggerStatus DebugLoop();
+  DebuggerStatus DebugLoop(uint32_t timeout, bool killing=false);
   int HandleDebuggerBreakpoint(void *address);
   void HandleDllLoadInternal(LOAD_DLL_DEBUG_INFO *LoadDll);
   DebuggerStatus HandleExceptionInternal(EXCEPTION_RECORD *exception_record);
@@ -161,9 +168,13 @@ private:
   DWORD GetImageSize(void *base_address);
   DWORD GetProcOffset(char *data, char *name);
   void *RemoteAllocateBefore(uint64_t min_address,
-    uint64_t max_address,
-    size_t size,
-    MemoryProtection protection);
+                             uint64_t max_address,
+                             size_t size,
+                             MemoryProtection protection);
+  void *RemoteAllocateAfter(uint64_t min_address,
+                            uint64_t max_address,
+                            size_t size,
+                            MemoryProtection protection);
 
 protected:
 
@@ -180,7 +191,6 @@ private:
   DEBUG_EVENT dbg_debug_event;
   DWORD dbg_continue_status;
   bool dbg_continue_needed;
-  uint64_t dbg_timeout_time;
   DebuggerStatus dbg_last_status;
 
   int wow64_target = 0;
@@ -216,6 +226,7 @@ private:
   DWORD thread_id;
   CONTEXT lcContext;
   bool have_thread_context;
+  size_t allocation_granularity;
 };
 
 #endif // DEBUGGER_H

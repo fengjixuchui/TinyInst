@@ -293,6 +293,7 @@ void *Debugger::RemoteAllocateNear(uint64_t region_min,
   size_t size,
   MemoryProtection protection)
 {
+  void *ret = NULL;
 
   // try before first
   uint64_t min_address = region_max;
@@ -302,12 +303,30 @@ void *Debugger::RemoteAllocateNear(uint64_t region_min,
   if (max_address < size) max_address = 0;
   else max_address -= size;
 
-  return RemoteAllocateBefore(min_address,
+  ret = RemoteAllocateBefore(min_address,
     max_address,
     size,
     protection);
 
-  // TODO: RemoteAllocateAfter
+  if (ret) return ret;
+
+  min_address = region_max;
+  uint64_t address_range_max = 0xFFFFFFFFFFFFFFFFULL;
+  if (child_ptr_size == 4) {
+    address_range_max = 0xFFFFFFFFULL;
+  }
+  if ((address_range_max - 0x80000000) < region_min) {
+    max_address = address_range_max - size;
+  } else {
+    max_address = region_min + 0x80000000 - size;
+  }
+
+  ret = RemoteAllocateAfter(min_address,
+    max_address,
+    size,
+    protection);
+
+  return ret;
 }
 
 
@@ -361,6 +380,64 @@ void *Debugger::RemoteAllocateBefore(uint64_t min_address,
     cur_code = (size_t)meminfobuf.BaseAddress;
     if (cur_code < step) break;
     else cur_code -= step;
+  }
+
+  return ret_address;
+}
+
+// allocates memory in target process as close as possible
+// to min_address, but not higher than min_address
+void *Debugger::RemoteAllocateAfter(uint64_t min_address,
+  uint64_t max_address,
+  size_t size,
+  MemoryProtection protection)
+{
+  DWORD protection_flags = WindowsProtectionFlags(protection);
+
+  MEMORY_BASIC_INFORMATION meminfobuf;
+  void *ret_address = NULL;
+
+  uint64_t cur_code = min_address;
+  while (cur_code < max_address) {
+    size_t query_ret = VirtualQueryEx(child_handle,
+      (LPCVOID)cur_code,
+      &meminfobuf,
+      sizeof(MEMORY_BASIC_INFORMATION));
+    if (!query_ret) break;
+
+    if (meminfobuf.State == MEM_FREE) {
+      size_t region_address = (size_t)meminfobuf.BaseAddress;
+      size_t region_size = meminfobuf.RegionSize;
+      // make sure we are allocating on an address that
+      // is aligned according to allocation_granularity
+      size_t alignment = region_address & (allocation_granularity - 1);
+      if (alignment) {
+        size_t offset = (allocation_granularity - alignment);
+        region_address += offset;
+        if (region_size > offset) {
+          region_size -= offset;
+        } else {
+          region_size = 0;
+        }
+      }
+      if (region_size >= size) {
+        ret_address = VirtualAllocEx(child_handle,
+          (LPVOID)region_address,
+          size,
+          MEM_COMMIT | MEM_RESERVE,
+          protection_flags);
+        if (ret_address) {
+          if (((size_t)ret_address >= min_address) &&
+            ((size_t)ret_address <= max_address)) {
+            return ret_address;
+          } else {
+            return NULL;
+          }
+        }
+      }
+    }
+
+    cur_code = (size_t)meminfobuf.BaseAddress + meminfobuf.RegionSize;
   }
 
   return ret_address;
@@ -1179,14 +1256,15 @@ DebuggerStatus Debugger::HandleExceptionInternal(EXCEPTION_RECORD *exception_rec
     break;
 
   default:
-    printf("Unhandled exception %x\n", exception_record->ExceptionCode);
+    if (trace_debug_events)
+      printf("Unhandled exception %x\n", exception_record->ExceptionCode);
     dbg_continue_status = DBG_EXCEPTION_NOT_HANDLED;
     return DEBUGGER_CONTINUE;
   }
 }
 
 // standard debugger loop that listens to events in the target process
-DebuggerStatus Debugger::DebugLoop()
+DebuggerStatus Debugger::DebugLoop(uint32_t timeout, bool killing)
 {
   DebuggerStatus ret;
   bool alive = true;
@@ -1203,8 +1281,14 @@ DebuggerStatus Debugger::DebugLoop()
   {
     have_thread_context = false;
 
+    uint64_t begin_time = GetCurTime();
     BOOL wait_ret = WaitForDebugEvent(DebugEv, 100);
+    uint64_t end_time = GetCurTime();
 
+    uint64_t time_elapsed = end_time - begin_time;
+    timeout = ((uint64_t)timeout >= time_elapsed) ? timeout - (uint32_t)time_elapsed : 0;
+
+    // printf("timeout: %u\n", timeout);
     // printf("time: %lld\n", get_cur_time_us());
 
     if (wait_ret) {
@@ -1213,7 +1297,7 @@ DebuggerStatus Debugger::DebugLoop()
       dbg_continue_needed = false;
     }
 
-    if (GetCurTime() > dbg_timeout_time) return DEBUGGER_HANGED;
+    if (timeout == 0) return DEBUGGER_HANGED;
 
     if (!wait_ret) {
       //printf("WaitForDebugEvent returned 0\n");
@@ -1229,9 +1313,13 @@ DebuggerStatus Debugger::DebugLoop()
     switch (DebugEv->dwDebugEventCode)
     {
     case EXCEPTION_DEBUG_EVENT:
-      ret = HandleExceptionInternal(&DebugEv->u.Exception.ExceptionRecord);
-      if (ret == DEBUGGER_CRASHED) OnCrashed(&last_exception);
-      if (ret != DEBUGGER_CONTINUE) return ret;
+      if (!killing) {
+        ret = HandleExceptionInternal(&DebugEv->u.Exception.ExceptionRecord);
+        if (ret == DEBUGGER_CRASHED) OnCrashed(&last_exception);
+        if (ret != DEBUGGER_CONTINUE) return ret;
+      } else {
+        dbg_continue_status = DBG_EXCEPTION_NOT_HANDLED;
+      }
       break;
 
     case CREATE_THREAD_DEBUG_EVENT:
@@ -1254,7 +1342,7 @@ DebuggerStatus Debugger::DebugLoop()
       break;
 
     case LOAD_DLL_DEBUG_EVENT: {
-      HandleDllLoadInternal(&DebugEv->u.LoadDll);
+      if(!killing) HandleDllLoadInternal(&DebugEv->u.LoadDll);
       CloseHandle(DebugEv->u.LoadDll.hFile);
       break;
     }
@@ -1399,10 +1487,7 @@ DebuggerStatus Debugger::Kill() {
 
   TerminateProcess(child_handle, 0);
   
-  // no timeout for process killing
-  dbg_timeout_time = 0xFFFFFFFFFFFFFFFFLL;
-
-  dbg_last_status = DebugLoop();
+  dbg_last_status = DebugLoop(0xFFFFFFFFUL, true);
   if (dbg_last_status != DEBUGGER_PROCESS_EXIT) {
     FATAL("Error killing target process\n");
   }
@@ -1443,6 +1528,16 @@ DebuggerStatus Debugger::Run(char *cmd, uint32_t timeout) {
   return Continue(timeout);
 }
 
+DebuggerStatus Debugger::Run(int argc, char **argv, uint32_t timeout) {
+    char* cmd = NULL;
+    cmd = ArgvToCmd(argc, argv);
+
+    DebuggerStatus ret_dbg_status = Run(cmd, timeout);
+    free(cmd);
+
+    return ret_dbg_status;
+}
+
 // continues after Run() or previous Continue()
 // return with a non-terminal status
 DebuggerStatus Debugger::Continue(uint32_t timeout) {
@@ -1455,8 +1550,7 @@ DebuggerStatus Debugger::Continue(uint32_t timeout) {
     return dbg_last_status;
   }
 
-  dbg_timeout_time = GetCurTime() + timeout;
-  dbg_last_status = DebugLoop();
+  dbg_last_status = DebugLoop(timeout);
 
   if (dbg_last_status == DEBUGGER_PROCESS_EXIT) {
     CloseHandle(child_handle);
@@ -1489,6 +1583,7 @@ void Debugger::Init(int argc, char **argv) {
   saved_args = NULL;
   target_num_args = 0;
   calling_convention = CALLCONV_DEFAULT;
+  target_address = NULL;
 
   char *option;
 
@@ -1539,4 +1634,9 @@ void Debugger::Init(int argc, char **argv) {
   if (target_num_args) {
     saved_args = (void **)malloc(target_num_args * sizeof(void *));
   }
+
+  // get allocation granularity
+  SYSTEM_INFO system_info;
+  GetSystemInfo(&system_info);
+  allocation_granularity = system_info.dwAllocationGranularity;
 }
